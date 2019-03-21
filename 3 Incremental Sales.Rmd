@@ -1,0 +1,120 @@
+---
+title: "Incremental Sales"
+output: html_notebook
+course: Marketing Analytics
+project: Recommender System
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+The notebook is computing the incremental sales for all products purchased by the target customers, which are narrowed down by assessing the customer's profitablity and promotion-sensitivity. 
+
+Firstly, we will load the packagaes and the files needed.
+
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+
+# Load the complete original transaction file
+transaction = fread("transaction_table.csv",header = T)
+
+# Load the profitability and promotion-sensitivity measurement lists for the target customers
+customers_profit = fread("profit.csv",header = T)
+customers_promo = fread("promo_sensitivity.csv", header=T)
+```
+
+The next step is to filter on profitability and promotion-sensitivity with a threshold of 0.5 to create the target customer list.
+
+```{r}
+# Create target customer list by joining the tables and filter customers who have >0.5 profitability and promotion-sensitivity
+customers <- setDT(left_join(customers_profit,customers_promo,by="cust_id"))
+customers <- customers[customers$cust_profit_percent>=0.5]
+customers <- customers[customers$promo_sensitivity>=0.5]
+```
+
+Then, we will reorganize the historical transaction data to the scope of this project: only the target customers' transactions within 2017
+
+```{r}
+# Subset transactions by year of 2017
+data <- subset(transaction, format(as.Date(tran_dt),"%Y")==2017)
+
+# Subset transactions only for target customers
+data <- data %>%
+  filter(cust_id %in% customers$cust_id)
+
+# Convert to data.table format for later steps
+data <- setDT(data)
+```
+
+Before calculating the weighted average sales, we need to get the total paid amount for the product's all transactions, an identifier if the product was purchased on promotion, total paid amount for each product, and the weights will be calculated by deviding the product's paid amounts/the product's total paid amount.
+
+Notes:
+The transaction value is calculated using unique identifiers as a combination of cust_id, tran_id and store_id
+
+```{r}
+# Calculate the transaction value
+data <- data[,tran_value:=sum(tran_prod_paid_amt),by=c("cust_id","tran_id","store_id")]
+
+# Create a new indicator is the product was sold on promotion for each row/observation
+data$if_promo = ifelse(data$tran_prod_discount_amt<0,1,0)
+
+# Calculate the total paid amount for each product
+data <- data[,total_prod_value:=sum(tran_prod_paid_amt),by=c("if_promo","prod_id")]
+
+# Calculate the weights
+data$weights = data$tran_prod_paid_amt/data$total_prod_value
+```
+
+The weighted average sales are calculated seperatedly for the product when it is on promotion or without promotion. The steps taken to get the results include splitting one product's transactions into a subset of promoted sales and a subset of unpromoted sales. For each product, weighted average sales are calculated from the two subsets and bind into one table of a full product list that the target customers purchased within the year.
+
+```{r}
+# Subset two tables of promoted and unpromoted transactions
+promoted <- data[data$if_promo==1]
+nonpromoted <- data[data$if_promo==0]
+
+# Create a list of unique prod_id 
+prod_list <- unique(data$prod_id)
+
+# Calculate the weighted average sales for the product's promoted transactions
+incre_sales=data.frame()
+for (i in prod_list) {
+  tmp <- promoted[promoted$prod_id==i]
+  tmp <- tmp[,avg_sales:=(sum(weights*tran_value))]
+  tmp <- unique(tmp[,c("prod_id","avg_sales")])
+  incre_sales = rbind(incre_sales, tmp)
+}
+
+# Calculate the weighted average sales for the product's unpromoted transactions
+incre_sales_np=data.frame()
+for (i in prod_list) {
+  tmp <- nonpromoted[nonpromoted$prod_id==i]
+  tmp <- tmp[,avg_sales_np:=(sum(weights*tran_value))]
+  tmp <- unique(tmp[,c("prod_id","avg_sales_np")])
+  incre_sales_np = rbind(incre_sales_np, tmp)
+}
+
+incremental_sales <- left_join(incre_sales_np, incre_sales, by="prod_id")
+```
+
+The last step is to calculate the incremental sales by subtracting the unpromoted weighted average sales from the promoted weighted average sales for each product.
+
+```{r}
+incremental_sales$incremental <- incremental_sales$avg_sales-incremental_sales$avg_sales_np
+
+```
+
+To visualize the distirbution of incremental sales, a histgram is plotted with a normal distribution of mean near 0.
+
+```{r}
+ggplot(incremental_sales) + geom_histogram(aes(x = incremental), binwidth = 5)
+
+summary(incremental_sales$incremental)
+```
+
+Lastly, a csv file is written out to use as the input to calculate the expected value.
+
+```{r}
+write.csv(incremental_sales, "incremental_sales.csv")
+```
+
